@@ -1,0 +1,198 @@
+<#
+Author:			Markus Greiner Skaylink GmbH
+Date:			2025-05-13
+
+Purpose of this script is to prepare a given Windows Server for the installation of 
+Entra Connect Sync or Entra Cloud Sync
+
+It will make sure that TLS 1.2 is active
+and it will install RSAT tools
+
+https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-install-prerequisites
+
+#>
+<#
+.DESCRIPTION
+    This Script is meant to be in a network share and onboards a server in Azure Arc
+    using a Service Principal:
+    https://docs.microsoft.com/en-us/azure/azure-arc/servers/onboard-service-principal#create-a-service-principal-for-onboarding-at-scale
+   
+    It makes the following validation checks before the onboarding:
+
+        - Checks if the machine is an Azure VM or a Non Azure Machine
+        - Checks Framework Version
+        - Checks PowerShell Version
+ 
+    If the server doesn't pass the requirements, all the information from the server: OS, Framework version,
+    PowerShell version, VM type ... is stored in a network share for further analisys.
+
+    If the server pass the requirements, the script checks if the Azure Hybrid Instance Metadata Service is already installed
+
+        If not, the script:
+
+        - Install the Connected Machine agent on the machine
+        - Connects the server to Azure Arc using a Service Principal
+        - Tags Azure Arc server with a given Tag
+        - Any Connection error is logged and the Agent code get: https://docs.microsoft.com/en-us/azure/azure-arc/servers/troubleshoot-agent-onboard#agent-error-codes
+
+
+        In positive case, the script:
+
+        - Checks azcmagent.exe version and updates the agent if a new version is found in the network folder
+        - Checks its connection status
+        - In case the server is disconnected it logs the last errors from the azcmagent.exe Agent on the shared folder
+
+
+.PARAMETER ReportServerFQDN
+   FQDN of the Server that will act as report Server (and source files)
+
+.PARAMETER AssessOnly
+   Switch parameter that makes script work in Assess mode.
+   No machines will be onboarded in Azure Arc.
+   Machines will only report if their prerequesites are met or not to the report share
+
+.EXAMPLE
+   This example onboards machines in Azure Arc 
+   
+   .\EnableAzureArc.ps1 -ArcRemoteShare AzureArcOnBoard 
+
+.EXAMPLE
+   This example assesses machines Azure Arc prerequisites and sends the info to the report share
+
+   .\EnableAzureArc.ps1 -ArcRemoteShare AzureArcOnBoard -AssessOnly
+
+#>
+
+$workfolder = "$env:SystemDrive\temp"
+$logpath = "$workfolder\01-Prepare-EntraConnect.log" #Local log file
+
+#region Functions and classes Definition
+Function Get-ADSyncToolsTls12RegValue
+{
+    [CmdletBinding()]
+    Param
+    (
+        # Registry Path
+        [Parameter(Mandatory=$true,
+                   Position=0)]
+        [string]
+        $RegPath,
+
+# Registry Name
+        [Parameter(Mandatory=$true,
+                   Position=1)]
+        [string]
+        $RegName
+    )
+    $regItem = Get-ItemProperty -Path $RegPath -Name $RegName -ErrorAction Ignore
+    $output = "" | select Path,Name,Value
+    $output.Path = $RegPath
+    $output.Name = $RegName
+
+If ($regItem -eq $null)
+    {
+        $output.Value = "Not Found"
+    }
+    Else
+    {
+        $output.Value = $regItem.$RegName
+    }
+    $output
+}
+Function Write-Log {
+    Param (
+        [System.String]$msg,
+        [ValidateSet("INFO", "ERROR", "WARNING")]
+        [System.String]$msgtype,
+        [Parameter(ValueFromPipeline)]
+        $InputObject,
+        [switch]$Force
+    )
+    if ($InputObject) {
+        $msg = $InputObject | Out-String
+    }
+    if ($PSBoundParameters.ContainsKey("Force")) {
+        Write-Output -InputObject "$(Get-Date -Format ("[yyyy-MM-dd][HH:mm:ss]")) $msgtype $msg" | Out-File $logpath
+    }
+    else {
+        Write-Output -InputObject "$(Get-Date -Format ("[yyyy-MM-dd][HH:mm:ss]")) $msgtype $msg" | Out-File $logpath -Append
+    }
+}
+
+#endregion
+$regSettings = @()
+$regKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\.NETFramework\v4.0.30319'
+$regSettings += Get-ADSyncToolsTls12RegValue $regKey 'SystemDefaultTlsVersions'
+$regSettings += Get-ADSyncToolsTls12RegValue $regKey 'SchUseStrongCrypto'
+
+$regKey = 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319'
+$regSettings += Get-ADSyncToolsTls12RegValue $regKey 'SystemDefaultTlsVersions'
+$regSettings += Get-ADSyncToolsTls12RegValue $regKey 'SchUseStrongCrypto'
+
+$regKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server'
+$regSettings += Get-ADSyncToolsTls12RegValue $regKey 'Enabled'
+$regSettings += Get-ADSyncToolsTls12RegValue $regKey 'DisabledByDefault'
+
+$regKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client'
+$regSettings += Get-ADSyncToolsTls12RegValue $regKey 'Enabled'
+$regSettings += Get-ADSyncToolsTls12RegValue $regKey 'DisabledByDefault'
+
+$regSettings
+
+If (-Not (Test-Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\.NETFramework\v4.0.30319'))
+{
+    New-Item 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\.NETFramework\v4.0.30319' -Force | Out-Null
+}
+New-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\.NETFramework\v4.0.30319' -Name 'SystemDefaultTlsVersions' -Value '1' -PropertyType 'DWord' -Force | Out-Null
+New-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\.NETFramework\v4.0.30319' -Name 'SchUseStrongCrypto' -Value '1' -PropertyType 'DWord' -Force | Out-Null
+
+If (-Not (Test-Path 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319'))
+{
+    New-Item 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319' -Force | Out-Null
+}
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319' -Name 'SystemDefaultTlsVersions' -Value '1' -PropertyType 'DWord' -Force | Out-Null
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319' -Name 'SchUseStrongCrypto' -Value '1' -PropertyType 'DWord' -Force | Out-Null
+
+If (-Not (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server'))
+{
+    New-Item 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server' -Force | Out-Null
+}
+New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server' -Name 'Enabled' -Value '1' -PropertyType 'DWord' -Force | Out-Null
+New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server' -Name 'DisabledByDefault' -Value '0' -PropertyType 'DWord' -Force | Out-Null
+
+If (-Not (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client'))
+{
+    New-Item 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client' -Force | Out-Null
+}
+New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client' -Name 'Enabled' -Value '1' -PropertyType 'DWord' -Force | Out-Null
+New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client' -Name 'DisabledByDefault' -Value '0' -PropertyType 'DWord' -Force | Out-Null
+
+Write-Host 'TLS 1.2 has been enabled. You must restart the Windows Server for the changes to take affect.' -ForegroundColor Cyan
+write-log -msgtype INFO "TLS 1.2 has been enabled"
+
+Write-Log -msgtype INFO "Installing RSAT"
+Install-WindowsFeature -Name RSAT-AD-PowerShell, RSAT-ADDS | Write-Log -msgtype INFO
+
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Force 
+
+# check NTLM Computer Configuration\Windows Settings\Security Settings\Local Policies\Security Options
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0"
+$regName = "RestrictSendingNTLMTraffic"
+$NTLM = Get-ItemProperty -Path $regPath -Name $regName | Select-Object -ExpandProperty $regName
+if ($NTLM -ne 2) {
+    write-host -ForegroundColor Red "Sending NTLM is active on this Server. Microsoft recommends to harden this Server and block Outgoing NTLM"
+    Write-Log -msgtype WARNING "Sending NTLM is active. This should not be the case on this T0 Server"
+}
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0"
+$regName = "RestrictReceivingNTLMTraffic"
+$NTLM = Get-ItemProperty -Path $regPath -Name $regName | Select-Object -ExpandProperty $regName
+if ($NTLM -ne 1) {
+    write-host -ForegroundColor Red "Receiving NTLM is active on this Server. Microsoft recommends to harden this Server and block Incoming NTLM"
+    Write-Log -msgtype WARNING "Receiving NTLM is active. This should not be the case on this T0 Server"
+}
+
+write-host "After all issues are resolved, you can continue and install Entra Connect"
+
+
+
+
