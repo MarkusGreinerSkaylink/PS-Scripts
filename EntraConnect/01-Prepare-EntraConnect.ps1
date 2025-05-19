@@ -3,63 +3,15 @@ Author:			Markus Greiner Skaylink GmbH
 Date:			2025-05-13
 
 Purpose of this script is to prepare a given Windows Server for the installation of 
-Entra Connect Sync or Entra Cloud Sync
+Entra Connect Sync 
 
 It will make sure that TLS 1.2 is active
 and it will install RSAT tools
 
+Microsoft recommends that NTLM is disabled on EntraConnect Server. You should use a GPO for this Server (do not disable NTLM globally without good preparation).
+The Script does not create this GPO, but it checks the relevant registry keys
+
 https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-install-prerequisites
-
-#>
-<#
-.DESCRIPTION
-    This Script is meant to be in a network share and onboards a server in Azure Arc
-    using a Service Principal:
-    https://docs.microsoft.com/en-us/azure/azure-arc/servers/onboard-service-principal#create-a-service-principal-for-onboarding-at-scale
-   
-    It makes the following validation checks before the onboarding:
-
-        - Checks if the machine is an Azure VM or a Non Azure Machine
-        - Checks Framework Version
-        - Checks PowerShell Version
- 
-    If the server doesn't pass the requirements, all the information from the server: OS, Framework version,
-    PowerShell version, VM type ... is stored in a network share for further analisys.
-
-    If the server pass the requirements, the script checks if the Azure Hybrid Instance Metadata Service is already installed
-
-        If not, the script:
-
-        - Install the Connected Machine agent on the machine
-        - Connects the server to Azure Arc using a Service Principal
-        - Tags Azure Arc server with a given Tag
-        - Any Connection error is logged and the Agent code get: https://docs.microsoft.com/en-us/azure/azure-arc/servers/troubleshoot-agent-onboard#agent-error-codes
-
-
-        In positive case, the script:
-
-        - Checks azcmagent.exe version and updates the agent if a new version is found in the network folder
-        - Checks its connection status
-        - In case the server is disconnected it logs the last errors from the azcmagent.exe Agent on the shared folder
-
-
-.PARAMETER ReportServerFQDN
-   FQDN of the Server that will act as report Server (and source files)
-
-.PARAMETER AssessOnly
-   Switch parameter that makes script work in Assess mode.
-   No machines will be onboarded in Azure Arc.
-   Machines will only report if their prerequesites are met or not to the report share
-
-.EXAMPLE
-   This example onboards machines in Azure Arc 
-   
-   .\EnableAzureArc.ps1 -ArcRemoteShare AzureArcOnBoard 
-
-.EXAMPLE
-   This example assesses machines Azure Arc prerequisites and sends the info to the report share
-
-   .\EnableAzureArc.ps1 -ArcRemoteShare AzureArcOnBoard -AssessOnly
 
 #>
 
